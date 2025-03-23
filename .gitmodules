@@ -1,6 +1,6 @@
 [submodule "temporal"]
 	path = temporal
-	url = https://github.com/temporalio/temporal
+	url = git@github.com:kopaygorodsky/temporal.git
 	branch = main
 [submodule "tctl"]
 	path = tctl
