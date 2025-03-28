@@ -15,7 +15,7 @@ TCTL_SHA := $(shell sh -c "git submodule status -- tctl | cut -c2-40")
 
 DOCKER ?= docker buildx
 BAKE := IMAGE_TAG=$(IMAGE_TAG) TEMPORAL_SHA=$(TEMPORAL_SHA) TCTL_SHA=$(TCTL_SHA) $(DOCKER) bake
-NATIVE_ARCH := $(shell go env GOARCH)
+NATIVE_ARCH := amd64
 
 # Default to loading into the local docker context. Provide the value 'registry' if you wish to push the images
 BAKE_OUTPUT ?= docker

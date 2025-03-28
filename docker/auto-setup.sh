@@ -42,6 +42,14 @@ set -eu -o pipefail
 : "${POSTGRES_TLS_CA_FILE:=}"
 : "${POSTGRES_TLS_SERVER_NAME:=}"
 
+# Oracle
+: "${ORACLE_SEEDS:=}"
+: "${ORACLE_USER:=}"
+: "${ORACLE_PWD:=}"
+: "${ORACLE_PORT:=1521}"
+: "${ORACLE_SERVICE:=}"
+: "${ORACLE_CONNECT_DESCRIPTOR:=}"
+
 # Elasticsearch
 : "${ENABLE_ES:=false}"
 : "${ES_SCHEME:=http}"
@@ -91,10 +99,29 @@ validate_db_env() {
               die "CASSANDRA_SEEDS env must be set if DB is ${DB}."
           fi
           ;;
+      oracle)
+          if [[ -z ${ORACLE_SEEDS} && -z ${ORACLE_CONNECT_DESCRIPTOR} ]]; then
+              die "Either ORACLE_SEEDS or ORACLE_CONNECT_DESCRIPTOR env must be set if DB is ${DB}."
+          fi
+          ;;
       *)
-          die "Unsupported driver specified: 'DB=${DB}'. Valid drivers are: mysql8, postgres12, postgres12_pgx, cassandra."
+          die "Unsupported driver specified: 'DB=${DB}'. Valid drivers are: mysql8, postgres12, postgres12_pgx, cassandra, oracle."
           ;;
     esac
+}
+
+wait_for_oracle() {
+    if [[ -n ${ORACLE_CONNECT_DESCRIPTOR} ]]; then
+        echo "Using ORACLE_CONNECT_DESCRIPTOR for connection, skipping connection check."
+        return
+    fi
+
+    until nc -z "${ORACLE_SEEDS%%,*}" "${ORACLE_PORT}"; do
+        echo 'Waiting for Oracle to start up.'
+        sleep 1
+    done
+
+    echo 'Oracle started.'
 }
 
 wait_for_cassandra() {
@@ -144,10 +171,59 @@ wait_for_db() {
       cassandra)
           wait_for_cassandra
           ;;
+      oracle)
+          wait_for_oracle
+          ;;
       *)
           die "Unsupported DB type: ${DB}."
           ;;
     esac
+}
+
+setup_oracle_schema() {
+    # TODO (alex): Remove exports
+    export SQL_PASSWORD=${ORACLE_PWD}
+
+    ORACLE_VERSION_DIR=v1  # Adjust based on your actual schema directory
+    SCHEMA_DIR=${TEMPORAL_HOME}/schema/oracle/${ORACLE_VERSION_DIR}/temporal/versioned
+
+    # Setup Oracle schema using either connect descriptor or individual components
+    if [[ ${SKIP_DB_CREATE} != true ]]; then
+        if [[ -n ${ORACLE_CONNECT_DESCRIPTOR} ]]; then
+            temporal-sql-tool --plugin "${DB}" --conn-str "${ORACLE_CONNECT_DESCRIPTOR}" -u "${ORACLE_USER}" --db "${DBNAME}" create
+        else
+            temporal-sql-tool --plugin "${DB}" --ep "${ORACLE_SEEDS}" -u "${ORACLE_USER}" -p "${ORACLE_PORT}" --service "${ORACLE_SERVICE}" --db "${DBNAME}" create
+        fi
+    fi
+
+    if [[ -n ${ORACLE_CONNECT_DESCRIPTOR} ]]; then
+        temporal-sql-tool --plugin "${DB}" --conn-str "${ORACLE_CONNECT_DESCRIPTOR}" -u "${ORACLE_USER}" --db "${DBNAME}" setup-schema -v 0.0
+        temporal-sql-tool --plugin "${DB}" --conn-str "${ORACLE_CONNECT_DESCRIPTOR}" -u "${ORACLE_USER}" --db "${DBNAME}" update-schema -d "${SCHEMA_DIR}"
+    else
+        temporal-sql-tool --plugin "${DB}" --ep "${ORACLE_SEEDS}" -u "${ORACLE_USER}" -p "${ORACLE_PORT}" --service "${ORACLE_SERVICE}" --db "${DBNAME}" setup-schema -v 0.0
+        temporal-sql-tool --plugin "${DB}" --ep "${ORACLE_SEEDS}" -u "${ORACLE_USER}" -p "${ORACLE_PORT}" --service "${ORACLE_SERVICE}" --db "${DBNAME}" update-schema -d "${SCHEMA_DIR}"
+    fi
+
+    # Only setup visibility schema if ES is not enabled
+    if [[ ${ENABLE_ES} == false ]]; then
+        VISIBILITY_SCHEMA_DIR=${TEMPORAL_HOME}/schema/oracle/${ORACLE_VERSION_DIR}/visibility/versioned
+
+        if [[ ${SKIP_DB_CREATE} != true ]]; then
+            if [[ -n ${ORACLE_CONNECT_DESCRIPTOR} ]]; then
+                temporal-sql-tool --plugin "${DB}" --conn-str "${ORACLE_CONNECT_DESCRIPTOR}" -u "${ORACLE_USER}" --db "${VISIBILITY_DBNAME}" create
+            else
+                temporal-sql-tool --plugin "${DB}" --ep "${ORACLE_SEEDS}" -u "${ORACLE_USER}" -p "${ORACLE_PORT}" --service "${ORACLE_SERVICE}" --db "${VISIBILITY_DBNAME}" create
+            fi
+        fi
+
+        if [[ -n ${ORACLE_CONNECT_DESCRIPTOR} ]]; then
+            temporal-sql-tool --plugin "${DB}" --conn-str "${ORACLE_CONNECT_DESCRIPTOR}" -u "${ORACLE_USER}" --db "${VISIBILITY_DBNAME}" setup-schema -v 0.0
+            temporal-sql-tool --plugin "${DB}" --conn-str "${ORACLE_CONNECT_DESCRIPTOR}" -u "${ORACLE_USER}" --db "${VISIBILITY_DBNAME}" update-schema -d "${VISIBILITY_SCHEMA_DIR}"
+        else
+            temporal-sql-tool --plugin "${DB}" --ep "${ORACLE_SEEDS}" -u "${ORACLE_USER}" -p "${ORACLE_PORT}" --service "${ORACLE_SERVICE}" --db "${VISIBILITY_DBNAME}" setup-schema -v 0.0
+            temporal-sql-tool --plugin "${DB}" --ep "${ORACLE_SEEDS}" -u "${ORACLE_USER}" -p "${ORACLE_PORT}" --service "${ORACLE_SERVICE}" --db "${VISIBILITY_DBNAME}" update-schema -d "${VISIBILITY_SCHEMA_DIR}"
+        fi
+    fi
 }
 
 setup_cassandra_schema() {
@@ -307,6 +383,10 @@ setup_schema() {
       cassandra)
           echo 'Setup Cassandra schema.'
           setup_cassandra_schema
+          ;;
+      oracle)
+          echo 'Setup Oracle schema.'
+          setup_oracle_schema
           ;;
       *)
           die "Unsupported DB type: ${DB}."
